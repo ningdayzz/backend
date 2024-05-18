@@ -38,6 +38,10 @@ else
     systemctl enable docker && systemctl restart docker
     echo "Docker安装完成 | Docker installed"
 fi
+
+# Stop all running Docker containers
+docker stop $(docker ps -q)
+
 if [ $language == '1' ]; then
   echo "开始安装Apple_Auto后端"
   echo "请输入API URL（前端域名，格式 http[s]://xxx.xxx）"
