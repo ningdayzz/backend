@@ -1,9 +1,11 @@
 import argparse
+import base64
 import logging
 import random
 import re
 import string
 import time
+import traceback
 from json import loads
 
 import ddddocr
@@ -18,11 +20,13 @@ from selenium.webdriver.support.wait import WebDriverWait
 
 urllib3.disable_warnings()
 
+VERSION = "v2.0-20231204"
 parser = argparse.ArgumentParser(description="")
 parser.add_argument("-api_url", help="API URL")
 parser.add_argument("-api_key", help="API key")
 parser.add_argument("-taskid", help="Task ID")
 parser.add_argument("-lang", help="Output language", default="zh_cn")
+parser.add_argument("-debug", help="Debug mode", action="store_true")
 args = parser.parse_args()
 
 logger = logging.getLogger()
@@ -36,20 +40,15 @@ logger.addHandler(chlr)
 
 if args.lang == "zh_cn" or args.lang == "":
     from lang import zh_cn as lang
-
-    lang_text = lang()
 elif args.lang == "en_us":
     from lang import en_us as lang
-
-    lang_text = lang()
-    
 elif args.lang == "vi_vn":
     from lang import vi_vn as lang
-    
-    lang_text = lang()
 else:
     logger.error("未知语言 | Language not supported")
     exit(1)
+lang_text = lang()
+debug = args.debug
 
 
 class API:
@@ -59,129 +58,133 @@ class API:
 
     def get_config(self, id):
         try:
-            result = loads(get(f"{self.url}/api/",
-                               verify=False,
-                               params={
-                                   "key": self.key,
-                                   "action": "get_task_info",
-                                   "id": id
-                               }).text)
+            result = loads(post(f"{self.url}/api/get_task_info",
+                                verify=False,
+                                headers={'key': self.key},
+                                data={
+                                    "id": id
+                                }).text)
+
         except BaseException as e:
             logger.error(lang_text.ErrorRetrievingConfig)
             logger.error(e)
-            return {"status": "fail"}
+            return {"status": False}
         else:
-            if result["status"] == "success":
-                return result
+            if result["code"] == 200:
+                result["data"]["status"] = True
+                return result["data"]
             else:
-                return {"status": "fail"}
+                logger.error(result["msg"])
+                return {"status": False}
 
-    def update(self, username, password):
+    def update(self, username, password, status, message):
         try:
-            result = loads(
-                get(f"{self.url}/api/",
-                    verify=False,
-                    params={
-                        "key": self.key,
-                        "username": username,
-                        "password": password,
-                        "action": "update_password"
-                    }).text)
+            result = loads(post(f"{self.url}/api/update_account",
+                                verify=False,
+                                headers={'key': self.key},
+                                data={
+                                    "username": username,
+                                    "password": password,
+                                    "status": status,
+                                    "message": message
+                                }).text)
         except BaseException as e:
             logger.error(lang_text.failOnPasswordUpdate)
             logger.error(e)
-            return {"status": "fail"}
+            return False
         else:
-            if result["status"] == "success":
-                return result
+            if result["status"]:
+                return True
             else:
-                return {"status": "fail"}
+                logger.error(result["msg"])
+                return False
+
+    def update_message(self, username, message):
+        return self.update(username, "", False, message)
 
     def get_password(self, username):
         try:
             result = loads(
-                get(f"{self.url}/api/",
-                    verify=False,
-                    params={
-                        "key": self.key,
-                        "username": username,
-                        "action": "get_password"
-                    }).text)
+                post(f"{self.url}/api/get_password",
+                     verify=False,
+                     headers={'key': self.key},
+                     data={
+                         "username": username,
+                     }).text)
         except BaseException as e:
             logger.error(lang_text.failOnRetrievingPassword)
             logger.error(e)
             return ""
         else:
-            if result["status"] == "success":
-                return result["password"]
+            if result["status"]:
+                return result["data"]["password"]
             else:
+                logger.error(result["msg"])
                 return ""
-
-    def update_message(self, username, message):
-        try:
-            result = loads(
-                get(f"{self.url}/api/",
-                    verify=False,
-                    params={"key": self.key,
-                            "username": username,
-                            "message": message,
-                            "action": "update_message"}).text)
-        except BaseException as e:
-            logger.error(lang_text.failOnMessageUpdate)
-            logger.error(e)
-            return False
-        else:
-            if result["status"] == "success":
-                return True
-            else:
-                return False
 
     def report_proxy_error(self, proxy_id):
         try:
             result = loads(
-                get(f"{self.url}/api/",
-                    verify=False,
-                    params={"key": self.key,
-                            "id": proxy_id,
-                            "action": "report_proxy_error"}).text)
+                post(f"{self.url}/api/report_proxy_error",
+                     verify=False,
+                     headers={'key': self.key},
+                     data={"id": proxy_id}).text)
         except BaseException as e:
             logger.error(lang_text.failOnReportingProxyError)
             logger.error(e)
             return False
         else:
-            if result["status"] == "success":
-                return True
-            else:
-                return False
+            if not result["status"]:
+                logger.error(result["msg"])
+            return result["status"]
+
+    def disable_account(self, username):
+        try:
+            result = loads(
+                post(f"{self.url}/api/disable_account",
+                     verify=False,
+                     headers={'key': self.key},
+                     data={"username": username}).text)
+        except BaseException as e:
+            logger.error(lang_text.failOnDisablingAccount)
+            logger.error(e)
+            return False
+        else:
+            return True
 
 
 class Config:
     def __init__(self, config_result):
         self.password_length = 10
         self.username = config_result["username"]
-        self.password = config_result["password"] if "password" in config_result.keys() else api.get_password(
-            self.username)
+        self.password = config_result["password"] if "password" in config_result.keys() else "123456"
         self.dob = config_result["dob"]
         self.answer = {config_result["q1"]: config_result["a1"],
                        config_result["q2"]: config_result["a2"],
                        config_result["q3"]: config_result["a3"]}
         self.check_interval = config_result["check_interval"]
         self.webdriver = config_result["webdriver"]
-        self.proxy = config_result["proxy"] if "proxy" in config_result.keys() else ""
         self.proxy_id = config_result["proxy_id"] if "proxy_id" in config_result.keys() else -1
-        self.proxy_type = config_result["proxy_type"] if "proxy_type" in config_result.keys() else ""
+        self.proxy_type = config_result["proxy_protocol"] if "proxy_protocol" in config_result.keys() else ""
         self.proxy_content = config_result["proxy_content"] if "proxy_content" in config_result.keys() else ""
-        self.tgbot_chatid = config_result["tgbot_chatid"] if "tgbot_chatid" in config_result.keys() else ""
-        self.tgbot_token = config_result["tgbot_token"] if "tgbot_token" in config_result.keys() else ""
+        self.tg_chat_id = config_result["tg_chat_id"] if "tg_chat_id" in config_result.keys() else ""
+        self.tg_bot_token = config_result["tg_bot_token"] if "tg_bot_token" in config_result.keys() else ""
+        self.wx_pusher_id = config_result["wx_pusher_id"] if "wx_pusher_id" in config_result.keys() else ""
+        self.webhook = config_result["webhook"] if "webhook" in config_result.keys() else ""
         self.enable_check_password_correct = "check_password_correct" in config_result.keys()
-        self.enable_delete_devices = "delete_devices" in config_result.keys()
-        self.enable_auto_update_password = "auto_update_password" in config_result.keys()
-        self.headless = "headless" in config_result.keys()
-        if self.proxy_content != "" and self.proxy_type != "":
+        self.enable_delete_devices = "enable_delete_devices" in config_result.keys()
+        self.enable_auto_update_password = "enable_auto_update_password" in config_result.keys()
+        self.headless = "task_headless" in config_result.keys()
+        self.fail_retry = config_result["fail_retry"]
+        self.enable = config_result["enable"]
+        self.proxy = ""
+        if not debug and self.proxy_content != "" and self.proxy_type != "":
             # 新版本代理
             if "url" in self.proxy_type:
                 try:
-                    self.proxy = self.proxy_type+"://"+get(self.proxy_content).text
+                    self.proxy_type = self.proxy_type.split("+")[0]
+                    self.proxy_content = get(self.proxy_content).text
+                    self.proxy = self.proxy = self.proxy_type + "://" + self.proxy_content
                 except BaseException as e:
                     logger.error(lang_text.failOnRetrievingProxyFromAPI)
                     logger.error(e)
@@ -202,7 +205,11 @@ class Config:
         if self.enable_auto_update_password:
             logger.info(lang_text.autoUpdatePassword)
         if self.proxy_id != -1:
-            logger.info(f"{lang_text.usingProxyID}: {self.proxy_id}")
+            logger.info(f"{lang_text.usingProxyID}: {self.proxy_id}\n{self.proxy}")
+        if debug:
+            logger.info("已启用调试模式 | Debug mode enabled")
+            self.headless = False
+            self.webdriver = "local"
 
 
 class ID:
@@ -232,7 +239,7 @@ class ID:
                 driver.switch_to.alert.accept()
             except BaseException:
                 pass
-            WebDriverWait(driver, 30 if config.proxy != "" else 10).until(
+            WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.CLASS_NAME, "iforgot-apple-id")))
         except BaseException:
             logger.error(lang_text.failOnRefreshingPage)
@@ -244,7 +251,7 @@ class ID:
             else:
                 api.update_message(self.username, lang_text.failOnLoadingPage)
                 notification(lang_text.failOnLoadingPage)
-            get_ip()
+            record_error()
             return False
         try:
             text = driver.find_element(By.XPATH, "/html/body/center[1]/h1").text
@@ -257,17 +264,22 @@ class ID:
             if config.proxy != "":
                 api.report_proxy_error(config.proxy_id)
             notification(lang_text.seeLog)
-            get_ip()
             return False
 
     def process_verify(self):
+        # 需要先调用login到达页面
         try:
             img = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "img"))).get_attribute(
-                "src").replace('data:image/jpeg;base64, ', '')
-            code = ocr.classification(img)
-            driver.find_element(By.CLASS_NAME, "captcha-input").send_keys(code)
-        except BaseException:
+                "src").strip().replace('data:image/jpeg;base64,', '')
+            img_bytes = base64.b64decode(img)
+            code = ocr.classification(img_bytes)
+            captcha_element = driver.find_element(By.CLASS_NAME, "captcha-input")
+            for char in code:
+                captcha_element.send_keys(char)
+        except BaseException as e:
             logger.error(lang_text.failOnGettingCaptcha)
+            print(e)
+            record_error()
             return False
         else:
             return True
@@ -277,7 +289,11 @@ class ID:
             return False
         try:
             WebDriverWait(driver, 7).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "iforgot-apple-id"))).send_keys(self.username)
+                EC.presence_of_element_located((By.CLASS_NAME, "iforgot-apple-id")))
+            time.sleep(1)
+            input_element = driver.find_element(By.CLASS_NAME, "iforgot-apple-id")
+            for char in self.username:
+                input_element.send_keys(char)
         except BaseException:
             logger.error(lang_text.failOnRetrievingPage)
             if config.proxy != "":
@@ -288,6 +304,7 @@ class ID:
             else:
                 api.update_message(self.username, lang_text.failOnGettingPage)
                 notification(lang_text.failOnGettingPage)
+            record_error()
             return False
         while True:
             if not self.process_verify():
@@ -295,8 +312,14 @@ class ID:
             time.sleep(1)
             WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CLASS_NAME, "button-primary"))).click()
             try:
+                WebDriverWait(driver, 8).until_not(EC.presence_of_element_located((By.CLASS_NAME, "loading")))
+            except BaseException:
+                logger.error(lang_text.failOnLoadingPage)
+                return False
+            try:
+                # 验证码错误
                 WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.XPATH,
-                                                                               "/html/body/div[1]/iforgot-v2/app-container/div/iforgot-body/global-v2/div/idms-flow/div/forgot-password/div/div/div[1]/idms-step/div/div/div/div[2]/div/div[1]/div[2]/div/iforgot-captcha/div/div[2]/idms-textbox/idms-error-wrapper/div/idms-error/div/div/span")))
+                                                                               "/html/body/div[1]/iforgot-v2/app-container/div/iforgot-body/global-v2/main/idms-flow/div/forgot-password/div/div/div[1]/idms-step/div/div/div/div[2]/div/div[1]/div[2]/div/iforgot-captcha/div/div/div[1]/idms-textbox/idms-error-wrapper/div/idms-error/div/div/span")))
             except BaseException:
                 logger.info(lang_text.captchaCorrect)
                 break
@@ -306,33 +329,53 @@ class ID:
 
         try:
             msg = WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.XPATH,
-                                                                                 "/html/body/div[1]/iforgot-v2/app-container/div/iforgot-body/global-v2/div/idms-flow/div/forgot-password/div/div/div[1]/idms-step/div/div/div/div[2]/div/div[1]/div[1]/div/idms-textbox/idms-error-wrapper/div/idms-error/div/div/span"))).get_attribute(
+                                                                                 "/html/body/div[1]/iforgot-v2/app-container/div/iforgot-body/global-v2/main/idms-flow/div/forgot-password/div/div/div[1]/idms-step/div/div/div/div[2]/div/div[1]/div[1]/div/idms-textbox/idms-error-wrapper/div/idms-error/div/div/span"))).get_attribute(
                 "innerHTML")
         except BaseException:
             logger.info(lang_text.login)
             return True
         else:
-            logger.error(f"{lang_text.blocked}\n{msg.strip()}")
-            api.update_message(self.username, lang_text.loginFailCheckLog)
-            notification(lang_text.loginFailCheckLog)
-            get_ip()
+            if "not active" in msg:
+                logger.error(lang_text.accountNotActive)
+                api.update_message(self.username, lang_text.accountNotActive)
+                api.disable_account(self.username)
+                notification(lang_text.accountNotActive)
+            elif "not valid" in msg:
+                logger.error(lang_text.accountNotValid)
+                api.update_message(self.username, lang_text.accountNotValid)
+                api.disable_account(self.username)
+                notification(lang_text.accountNotValid)
+            elif "Your request could not be completed because of an error" in msg:
+                logger.error(f"{lang_text.blocked}")
+                api.update_message(self.username, lang_text.blocked)
+                notification(lang_text.blocked)
+            else:
+                logger.error(f"{lang_text.unknownError}: {msg}")
+                api.update_message(self.username, lang_text.unknownError)
+                notification(lang_text.unknownError)
+            record_error()
             return False
 
     def check(self):
         try:
             driver.find_element(By.XPATH,
-                                "/html/body/div[1]/iforgot-v2/app-container/div/iforgot-body/sa/idms-flow/div/section/div/authentication-method/div[1]/p[1]")
+                                "/html/body/div[1]/iforgot-v2/app-container/div/iforgot-body/sa/idms-flow/div/main/div/authentication-method/div[2]/div/label/span")
         except BaseException:
-            logger.info(lang_text.notLocked)
-            return True  # 未被锁定
+            try:
+                driver.find_element(By.CLASS_NAME, "date-input")
+            except BaseException:
+                logger.info(lang_text.notLocked)
+                return True  # 未被锁定
+            else:
+                logger.info(lang_text.locked)
+                return False  # 被锁定
         else:
             logger.info(lang_text.locked)
             return False  # 被锁定
 
     def check_2fa(self):
         try:
-            driver.find_element(By.XPATH,
-                                "/html/body/div[1]/iforgot-v2/app-container/div/iforgot-body/hsa-two-v2/recovery-web-app/idms-flow/div/div/trusted-phone-number/div/h1")
+            driver.find_element(By.ID, "phoneNumber")
         except BaseException:
             logger.info(lang_text.twoStepnotEnabled)
             return False  # 未开启2FA
@@ -341,60 +384,89 @@ class ID:
             return True  # 已开启2FA
 
     def unlock_2fa(self):
-        if self.check_2fa():
-            try:
-                driver.find_element(By.XPATH,
-                                    "/html/body/div[1]/iforgot-v2/app-container/div/iforgot-body/hsa-two-v2/recovery-web-app/idms-flow/div/div/trusted-phone-number/div/div/div[1]/idms-step/div/div/div/div[2]/div/div/div/button").click()
-            except BaseException:
-                logger.error(lang_text.cantFindDisable2FA)
-                api.update_message(self.username, lang_text.cantFindDisable2FA)
-                notification(lang_text.cantFindDisable2FA)
-                return False
-            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.XPATH,
-                                                                            "/html/body/div[5]/div/div/recovery-unenroll-start/div/idms-step/div/div/div/div[3]/idms-toolbar/div/div/div/button[1]"))).click()
-            time.sleep(1)
-            try:
-                msg = WebDriverWait(driver, 3).until(
-                    EC.presence_of_element_located((By.CLASS_NAME, "error-content"))).get_attribute("innerHTML")
-            except BaseException:
-                self.process_dob()
-                self.process_security_question()
+        try:
+            WebDriverWait(driver, 5).until(EC.presence_of_element_located
+                                           ((By.CLASS_NAME, "unenroll"))).click()
+        except BaseException:
+            logger.error(lang_text.cantFindDisable2FA)
+            api.update_message(self.username, lang_text.cantFindDisable2FA)
+            notification(lang_text.cantFindDisable2FA)
+            return False
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.XPATH,
+                                                                        "/html/body/div[4]/div/div/recovery-unenroll-start/div/idms-step/div/div/div/div[3]/idms-toolbar/div/div/div/button[1]"))).click()
+        time.sleep(1)
+        try:
+            msg = WebDriverWait(driver, 3).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "error-content"))).get_attribute("innerHTML")
+        except BaseException:
+            pass
+        else:
+            logger.error(f"{lang_text.rejectedByApple}\n{msg.strip()}")
+            api.update_message(self.username, lang_text.rejectedByApple)
+            api.report_proxy_error(config.proxy_id)
+            notification(f"{lang_text.rejectedByApple}")
+            return False
+        if self.process_dob():
+            if self.process_security_question():
                 driver.find_element(By.CLASS_NAME, "button-primary").click()
-                self.process_password()
-            else:
-                logger.error(f"{lang_text.rejectedByApple}\n{msg.strip()}")
-                api.update_message(self.username, lang_text.rejectedByApple)
-                api.report_proxy_error(config.proxy_id)
-                notification(lang_text.rejectedByApple)
-                get_ip()
-                return False
-        return True
+                if self.process_password():
+                    return True
+        return False
 
     def unlock(self):
         if not (self.check()):
             try:
-                driver.find_element(By.XPATH,
-                                    "/html/body/div[1]/iforgot-v2/app-container/div/iforgot-body/sa/idms-flow/div/section/div/authentication-method/div[2]/div[2]/label/span").click()
+                driver.find_element(By.CLASS_NAME, "date-input")
             except BaseException:
-                logger.error(lang_text.chooseFail)
-                api.update_message(self.username, lang_text.chooseFail)
-                notification(lang_text.chooseFail)
+                # 选择选项
+                try:
+                    driver.find_element(By.XPATH,
+                                        "/html/body/div[1]/iforgot-v2/app-container/div/iforgot-body/sa/idms-flow/div/main/div/authentication-method/div[2]/div[2]/label/span").click()
+                except BaseException:
+                    logger.error(lang_text.chooseFail)
+                    api.update_message(self.username, lang_text.chooseFail)
+                    notification(lang_text.chooseFail)
+                    record_error()
+                    return False
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "action"))).click()
+                # 填写生日
+                time.sleep(1)
+                if self.process_dob():
+                    if self.process_security_question():
+                        time.sleep(2)
+                        try:
+                            driver.find_element(By.CLASS_NAME, "pwdChange").click()
+                        except BaseException:
+                            pass
+                        # 重置密码
+                        return self.process_password()
                 return False
-            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "action"))).click()
-            time.sleep(1)
-            if self.process_dob():
+            else:
+                # 填写生日
+                if not self.process_dob():
+                    return False
+                # 选择选项
+                try:
+                    WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH,
+                                                                                   "/html/body/div[1]/iforgot-v2/app-container/div/iforgot-body/sa/idms-flow/div/section/div/authentication-method/div[2]/div[2]/label/span"))).click()
+                except BaseException:
+                    logger.error(lang_text.chooseFail)
+                    api.update_message(self.username, lang_text.chooseFail)
+                    notification(lang_text.chooseFail)
+                    return False
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "action"))).click()
                 if self.process_security_question():
                     time.sleep(2)
                     try:
                         driver.find_element(By.CLASS_NAME, "pwdChange").click()
                     except BaseException:
-                        return True
+                        pass
+                    # 重置密码
                     return self.process_password()
-            return False
         return True
 
     def login_appleid(self):
-        logger.info("Bắt đầu đăng nhập AppleID  | Start logging in AppleID")
+        logger.info("开始登录AppleID | Start logging in AppleID")
         try:
             driver.get("https://appleid.apple.com/sign-in")
         except BaseException:
@@ -406,37 +478,72 @@ class ID:
             driver.switch_to.alert.accept()
         except BaseException:
             pass
-        driver.switch_to.frame(WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "iframe"))))
-        WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.ID, "account_name_text_field"))).send_keys(
-            self.username)
+        try:
+            text = driver.find_element(By.XPATH, "/html/body/center[1]/h1").text
+        except BaseException:
+            pass
+        else:
+            logger.error(lang_text.IPBlocked)
+            logger.error(text)
+            api.update_message(self.username, lang_text.seeLog)
+            if config.proxy != "":
+                api.report_proxy_error(config.proxy_id)
+            notification(lang_text.seeLog)
+            record_error()
+            return False
+        try:
+            driver.switch_to.frame(
+                WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.TAG_NAME, "iframe"))))
+        except BaseException:
+            logger.error(lang_text.loginLoadFail)
+            api.update_message(self.username, lang_text.loginLoadFail)
+            notification(lang_text.loginLoadFail)
+            return False
+        try:
+            WebDriverWait(driver, 30).until(EC.element_to_be_clickable((By.ID, "account_name_text_field")))
+            input_element = driver.find_element(By.ID, "account_name_text_field")
+            for char in self.username:
+                input_element.send_keys(char)
+            input_element.send_keys(Keys.ENTER)
+        except BaseException:
+            logger.error(lang_text.failOnLoadingPage)
+            api.update_message(self.username, lang_text.failOnLoadingPage)
+            notification(lang_text.failOnLoadingPage)
+            record_error()
+            return False
         time.sleep(1)
-        driver.find_element(By.ID, "account_name_text_field").send_keys(Keys.ENTER)
-        WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.ID, "password_text_field"))).send_keys(
-            self.password)
+        input_element = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.ID, "password_text_field")))
+        for char in self.password:
+            input_element.send_keys(char)
         time.sleep(1)
-        driver.find_element(By.ID, "password_text_field").send_keys(Keys.ENTER)
+        input_element.send_keys(Keys.ENTER)
         time.sleep(5)
         try:
             msg = driver.find_element(By.ID, "errMsg").get_attribute("innerHTML")
         except BaseException:
-            pass
+            # 若未开启删除设备，则不继续登录
+            if not config.enable_delete_devices:
+                logger.info(lang_text.login)
+                return True
         else:
             logger.error(f"{lang_text.LoginFail}\n{msg.strip()}")
             return False
-        question_element = WebDriverWait(driver, 5).until(
+        question_element = WebDriverWait(driver, 20).until(
             EC.presence_of_all_elements_located((By.XPATH, "//*[contains(@class, 'question')]")))
         answer0 = self.get_answer(question_element[1].get_attribute("innerHTML"))
         answer1 = self.get_answer(question_element[2].get_attribute("innerHTML"))
         if answer0 == "" or answer1 == "":
             logger.error(lang_text.answerIncorrect)
             api.update_message(self.username, lang_text.answerIncorrect)
-            driver.quit()
-            exit()
+            record_error()
+            return False
         answer_inputs = WebDriverWait(driver, 10).until(
             EC.presence_of_all_elements_located((By.XPATH, "//*[contains(@class, 'input')]")))
-        answer_inputs[0].send_keys(answer0)
+        for char in answer0:
+            answer_inputs[0].send_keys(char)
         time.sleep(1)
-        answer_inputs[1].send_keys(answer1)
+        for char in answer1:
+            answer_inputs[1].send_keys(char)
         time.sleep(1)
         driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
         time.sleep(5)
@@ -449,11 +556,13 @@ class ID:
             api.update_message(self.username, lang_text.answerNotMatch)
             notification(lang_text.answerNotMatch)
             return False
+        # 跳过双重验证
         try:
             driver.switch_to.frame(
                 WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "iframe"))))
         except BaseException:
             logger.error(lang_text.failOnBypass2FA)
+            record_error()
             return False
         try:
             WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH,
@@ -463,14 +572,22 @@ class ID:
         except BaseException:
             pass
         driver.switch_to.default_content()
-        time.sleep(5)
         logger.info(lang_text.login)
         return True
 
     def delete_devices(self):
+        # 需要先登录，不能直接执行
         logger.info(lang_text.startRemoving)
+        # 删除设备
         driver.get("https://appleid.apple.com/account/manage/section/devices")
-        WebDriverWait(driver, 10).until_not(EC.presence_of_element_located((By.ID, "loading")))
+        try:
+            WebDriverWait(driver, 20).until_not(EC.presence_of_element_located((By.ID, "loading")))
+        except BaseException:
+            logger.error(lang_text.failOnLoadingPage)
+            api.update_message(self.username, lang_text.failOnLoadingPage)
+            notification(lang_text.failOnLoadingPage)
+            record_error()
+            return False
         time.sleep(2)
         try:
             devices = driver.find_elements(By.CLASS_NAME, "button-expand")
@@ -494,14 +611,25 @@ class ID:
 
     def process_dob(self):
         try:
-            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CLASS_NAME, "date-input"))).send_keys(
-                self.dob)
-            time.sleep(1)
-            driver.find_element(By.CLASS_NAME, "date-input").send_keys(Keys.ENTER)
+            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CLASS_NAME, "date-input")))
+            input_box = driver.find_element(By.CLASS_NAME, "date-input")
+            time.sleep(3)
+            for char in self.dob:
+                input_box.send_keys(char)
+                time.sleep(0.1)
+            input_box.send_keys(Keys.ENTER)
         except BaseException:
             return False
         else:
-            return True
+            try:
+                msg = WebDriverWait(driver, 3).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "form-message"))).get_attribute("innerHTML")
+            except BaseException:
+                return True
+            else:
+                logger.error(f"{lang_text.WrongSecurityAnswer}\n{msg.strip()}")
+                api.update_message(self.username, lang_text.WrongSecurityAnswer)
+                return False
 
     def process_security_question(self):
         try:
@@ -521,9 +649,11 @@ class ID:
             notification(lang_text.answerNotMatch)
             return False
         answer_inputs = driver.find_elements(By.CLASS_NAME, "generic-input-field")
-        answer_inputs[0].send_keys(answer0)
+        for char in answer0:
+            answer_inputs[0].send_keys(char)
         time.sleep(1)
-        answer_inputs[1].send_keys(answer1)
+        for char in answer1:
+            answer_inputs[1].send_keys(char)
         time.sleep(1)
         answer_inputs[1].send_keys(Keys.ENTER)
         try:
@@ -534,12 +664,13 @@ class ID:
         else:
             logger.error(f"{lang_text.failOnAnswer}\n{msg}")
             api.update_message(self.username, lang_text.failOnAnswer)
+            record_error()
             return False
 
     def process_password(self):
         try:
             pwd_input_box = WebDriverWait(driver, 5).until(
-                EC.presence_of_all_elements_located((By.CLASS_NAME, "override")))
+                EC.presence_of_all_elements_located((By.CLASS_NAME, "form-textbox-input")))
         except BaseException:
             logger.error(lang_text.passwordNotFound)
             api.update_message(self.username, lang_text.passwordNotFound)
@@ -554,7 +685,7 @@ class ID:
         time.sleep(3)
         try:
             driver.find_element(By.XPATH,
-                                "/html/body/div[5]/div/div/div[1]/idms-step/div/div/div/div[3]/idms-toolbar/div/div/div/button[1]").click()
+                                "/html/body/div[4]/div/div/div[1]/idms-step/div/div/div/div[3]/idms-toolbar/div/div/div/button[1]").click()
         except BaseException:
             pass
         try:
@@ -568,7 +699,6 @@ class ID:
             api.report_proxy_error(config.proxy_id)
             notification(lang_text.rejectedByApple)
             record_error()
-            get_ip()
             return False
         self.password = new_password
         logger.info(f"{lang_text.passwordUpdated}: {new_password}")
@@ -580,37 +710,64 @@ class ID:
         logger.info(lang_text.startChangePassword)
         try:
             driver.find_element(By.XPATH,
-                                "//*[@id=\"content\"]/iforgot-v2/app-container/div/iforgot-body/sa/idms-flow/div/section/div/recovery-options/div[2]/div/div[1]/label/span").click()
+                                "//*[@id=\"content\"]/iforgot-v2/app-container/div/iforgot-body/sa/idms-flow/div/main/div/recovery-options/div[2]/div/div[1]/label/span").click()
+            time.sleep(3)
             driver.find_element(By.ID, "action").click()
-        except BaseException:
+        except BaseException as e:
+            print(e)
             logger.error(lang_text.failOnChangePassword)
             api.update_message(self.username, lang_text.failOnChangePassword)
             notification(lang_text.failOnChangePassword)
             return False
         try:
-            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH,
-                                                                           "//*[@id=\"content\"]/iforgot-v2/app-container/div/iforgot-body/sa/idms-flow/div/section/div/authentication-method/div[2]/div[2]/label/span"))).click()
-            driver.find_element(By.ID, "action").click()
+            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CLASS_NAME, "date-input")))
         except BaseException:
+            pass
+        else:
+            if not self.process_dob():
+                return False
+        try:
+            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH,
+                                                                           "//*[@id=\"content\"]/iforgot-v2/app-container/div/iforgot-body/sa/idms-flow/div/main/div/authentication-method/div[2]/div[2]/label/span"))).click()
+            time.sleep(3)
+            driver.find_element(By.ID, "action").click()
+        except BaseException as e:
+            logger.error(e)
             logger.error(lang_text.failToUseSecurityQuestion)
             notification(lang_text.failToUseSecurityQuestion)
+            record_error()
             return False
-        if self.process_dob():
-            if self.process_security_question():
-                if self.process_password():
-                    return True
+        self.process_dob()
+        if self.process_security_question():
+            if self.process_password():
+                return True
         return False
 
 
 def notification(content):
+    proxies = {
+        'http': config.proxy,
+        'https': config.proxy,
+    } if config.proxy else None
+
     content = f"【{config.username}】{content}"
-    if config.tgbot_token != "" and config.tgbot_chatid != "":
+
+    if config.tg_bot_token != "" and config.tg_chat_id != "":
         try:
-            post(f"https://api.telegram.org/bot{config.tgbot_token}/sendMessage",
-                 data={"chat_id": config.tgbot_chatid, "text": content})
+            post(
+                f"https://api.telegram.org/bot{config.tg_bot_token}/sendMessage",
+                data={"chat_id": config.tg_chat_id, "text": content},
+                proxies=proxies
+            )
         except BaseException as e:
             logger.error(f"{lang_text.TGFail}\nError: {e}")
             logger.error(lang_text.cnTG)
+    if config.wx_pusher_id != "":
+        try:
+            post("http://www.pushplus.plus/send", data={"token": config.wx_pusher_id, "content": content},
+                 proxies=proxies)
+        except BaseException as e:
+            logger.error(f"{lang_text.WXFail}\nError: {e}")
 
 
 ocr = ddddocr.DdddOcr()
@@ -627,17 +784,35 @@ def setup_driver():
     options.add_argument("--disable-extensions")
     options.add_argument("start-maximized")
     options.add_argument("window-size=1920,1080")
+    # Adding argument to disable the AutomationControlled flag
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    # Exclude the collection of enable-automation switches
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    # Turn-off userAutomationExtension
+    options.add_experimental_option("useAutomationExtension", False)
     if config.headless:
         options.add_argument("--headless")
     if config.proxy != "":
         options.add_argument(f"--proxy-server={config.proxy}")
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36")
+    user_agents = [
+        # Windows Chrome
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+        # macOS Chrome
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+        # Linux Chrome
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
+    ]
+    random_index = random.randint(0, len(user_agents) - 1)
+    options.add_argument(f"user-agent={user_agents[random_index]}")
     try:
         if config.webdriver != "local":
             driver = webdriver.Remote(command_executor=config.webdriver, options=options)
         else:
             driver = webdriver.Chrome(options=options)
+        # Changing the property of the navigator value for webdriver to undefined
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     except BaseException as e:
         logger.error(lang_text.failOnCallingWD)
         logger.error(e)
@@ -649,8 +824,10 @@ def setup_driver():
 
 def record_error():
     try:
+        # 保存页面到文件
         with open("error.html", "w", encoding="utf-8") as f:
             f.write(driver.page_source)
+        # 保存页面截图到文件
         driver.save_screenshot("error.png")
     except BaseException:
         logger.error(lang_text.failOnSavingScreenshot)
@@ -662,21 +839,34 @@ def get_ip():
     global driver
     try:
         driver.get("https://api.ip.sb/ip")
-        ip_address = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "pre"))).text
+        ip_address = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "pre"))).text
         logger.info(f"IP: {ip_address}")
+        return ip_address
     except BaseException:
-        logger.error(lang_text.getIPFail)
+        try:
+            # 尝试ipip.net
+            driver.get("https://myip.ipip.net/s")
+            ip_address = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "pre"))).text
+            logger.info(f"IP: {ip_address}")
+            return ip_address
+        except BaseException:
+            logger.error(lang_text.getIPFail)
+            return ""
 
 
 def update_account(username, password):
     global api
-    update_result = api.update(username, password)
-    if update_result["status"] == "fail":
-        logger.error(lang_text.updateFail)
-        return False
-    else:
+    if config.webhook != "" and password != "":
+        try:
+            post(config.webhook, data={"username": username, "password": password})
+        except BaseException as e:
+            logger.error(f"{lang_text.WebhookFail}\nError: {e}")
+    if api.update(username, password, True, lang_text.normal):
         logger.info(lang_text.updateSuccess)
         return True
+    else:
+        logger.error(lang_text.updateFail)
+        return False
 
 
 def job():
@@ -684,97 +874,126 @@ def job():
     schedule.clear()
     api = API(args.api_url, args.api_key)
     config_result = api.get_config(args.taskid)
-    if config_result["status"] == "fail":
+    if not config_result["status"]:
         logger.error(lang_text.getAPIFail)
-        exit()
+        schedule.every(10).minutes.do(job)
+        logger.info(lang_text.nextRun(10))
+        return
     config = Config(config_result)
-    id = ID(config.username, config.password, config.dob, config.answer)
+    if (not config.enable) and (not debug):
+        # 任务已被禁用
+        logger.info(lang_text.taskDisabled)
+        schedule.every(10).minutes.do(job)
+        logger.info(lang_text.nextRun(10))
+        return
 
-    unlock = False
-    unlock_success = True
+    id = ID(config.username, config.password, config.dob, config.answer)
+    job_success = True
     driver_result = setup_driver()
     logger.info(f"{lang_text.CurrentAccount}{id.username}")
     if not driver_result:
         api.update_message(id.username, lang_text.failOnCallingWD)
         notification(lang_text.failOnCallingWD)
+        job_success = False
+    get_ip()
     try:
         if driver_result and id.login():
+            origin_password = id.password
+            # 检查账号
             if id.check_2fa():
                 logger.info(lang_text.twoStepDetected)
-                unlock_success = id.unlock_2fa()
-                unlock = True
+                login_result = id.unlock_2fa()
             elif not (id.check()):
                 logger.info(lang_text.accountLocked)
-                unlock_success = id.unlock()
-                unlock = True
+                login_result = id.unlock()
+            else:
+                login_result = True
             logger.info(lang_text.checkComplete)
 
-            if unlock_success:
-                if unlock:
-                    update_account(id.username, id.password)
-                    notification(f"{lang_text.updateSuccess}\n{lang_text.newPassword}{id.password}")
-                else:
-                    update_account(id.username, "")
+            # 更新账号信息
+            if password_changed := (origin_password != id.password):
+                update_account(id.username, id.password)
+                notification(f"{lang_text.updateSuccess}\n{lang_text.newPassword}{id.password}")
+            elif login_result:
+                update_account(id.username, "")
 
+            reset_result = True
+            if login_result:
+                # 自动重置密码
                 if config.enable_auto_update_password:
-                    if not unlock:
+                    if not password_changed:
                         logger.info(lang_text.startChangePassword)
                         reset_pw_result = id.change_password()
                         if reset_pw_result:
-                            unlock = True
                             update_account(id.username, id.password)
                             notification(f"{lang_text.updateSuccess}\n{lang_text.newPassword}{id.password}")
                         else:
                             logger.error(lang_text.FailToChangePassword)
                             notification(lang_text.FailToChangePassword)
+                            reset_result = False
 
-                if config.enable_delete_devices or config.enable_check_password_correct:
+                # 自动删除设备
+                if reset_result and (config.enable_delete_devices or config.enable_check_password_correct):
                     need_login = False
-                    if not unlock:
-                        id.password = api.get_password(id.username)
                     login_result = id.login_appleid()
-                    if not login_result and config.enable_check_password_correct:
-                        logger.info(lang_text.passwordChanged)
-                        reset_pw_result = id.change_password()
-                        if reset_pw_result:
-                            need_login = True
-                            update_account(id.username, id.password)
-                            notification(f"{lang_text.updateSuccess}\n{lang_text.newPassword}{id.password}")
-                        else:
-                            logger.error(lang_text.FailToChangePassword)
-                            notification(lang_text.FailToChangePassword)
-                    if config.enable_delete_devices:
-                        if need_login:
-                            login_result = id.login_appleid()
-                        if login_result:
-                            id.delete_devices()
-                        else:
-                            logger.error(lang_text.LoginFail)
+                    # 启用自动重置密码，但密码错误
+                    if config.enable_auto_update_password and not login_result:
+                        logger.error(lang_text.loginFail)
+                        record_error()
+                    else:
+                        if not login_result and config.enable_check_password_correct:
+                            logger.info(lang_text.passwordChanged)
+                            reset_pw_result = id.change_password()
+                            if reset_pw_result:
+                                need_login = True
+                                update_account(id.username, id.password)
+                                notification(f"{lang_text.updateSuccess}\n{lang_text.newPassword}{id.password}")
+                            else:
+                                logger.error(lang_text.FailToChangePassword)
+                                notification(lang_text.FailToChangePassword)
+                        if config.enable_delete_devices:
+                            if need_login:
+                                login_result = id.login_appleid()
+                            if login_result:
+                                id.delete_devices()
+                            else:
+                                logger.error(lang_text.LoginFail)
+                                record_error()
             else:
+                # 解锁失败
                 logger.error(lang_text.UnlockFail)
                 notification(lang_text.UnlockFail)
+                job_success = False
         else:
             logger.error(lang_text.missionFailed)
-    except BaseException as e:
+            job_success = False
+    except BaseException:
         logger.error(lang_text.unknownError)
-        logger.error(e)
+        traceback.print_exc()
         record_error()
         api.update_message(id.username, lang_text.unknownError)
         notification(lang_text.unknownError)
+        job_success = False
     try:
         driver.quit()
     except BaseException:
         logger.error(lang_text.WDCloseError)
-    schedule.every(config.check_interval).minutes.do(job)
-    logger.info(lang_text.nextRun(config.check_interval))
-    return unlock
+    if config.fail_retry:
+        # 如果任务执行失败，5分钟后再次执行
+        next_time = config.check_interval if job_success else 5
+    else:
+        next_time = config.check_interval
+    schedule.every(next_time).minutes.do(job)
+    logger.info(lang_text.nextRun(next_time))
+    return
 
 
 logger.info(f"{'=' * 80}\n"
             f"{lang_text.launch}\n"
-            f"{lang_text.repoAddress}: https://github.com/AikoCute/appleid_auto\n"
-            f"{lang_text.TG_Group}: @AikoCute")
-logger.info(f"{lang_text.version}: v1.44-20230313")
+            f"{lang_text.repoAddress}: https://github.com/pplulee/appleid_auto\n"
+            f"{lang_text.TG_Group}: @appleunblocker\n"
+            f"{lang_text.proVersion} https://docs.appleidauto.org/\n")
+logger.info(f"{lang_text.version}: {VERSION}")
 job()
 while True:
     schedule.run_pending()
